@@ -1,0 +1,91 @@
+# ── docker-compose.yml ── Dev profile ─────────────────────
+# Usage: docker compose up -d
+# ──────────────────────────────────────────────────────────
+
+services:
+  # ── PostgreSQL + TimescaleDB (pg16) ──────────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: purecast-timescaledb
+    environment:
+      POSTGRES_USER: purecast
+      POSTGRES_PASSWORD: purecast_dev
+      POSTGRES_DB: purecast
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/timescale-init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U purecast -d purecast"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ───────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: purecast-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+
+  # ── Mosquitto MQTT Broker (allow anonymous for dev) ────
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: purecast-mosquitto
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./docker/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ./docker/mosquitto/acl.conf:/mosquitto/config/acl.conf
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -t '$$SYS/#' -C 1 -W 3 || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # ── API (Hot Reload, Non-root) ──────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    container_name: purecast-api
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://purecast:purecast_dev@timescaledb:5432/purecast
+      - REDIS_URL=redis://redis:6379/0
+      - MQTT_BROKER_HOST=mosquitto
+      - MQTT_BROKER_PORT=1883
+    volumes:
+      - ./src:/app/src
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: ["uvicorn", "purecast.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+volumes:
+  postgres_data:
+  redis_data:
+  mosquitto_data:
+  mosquitto_log:
